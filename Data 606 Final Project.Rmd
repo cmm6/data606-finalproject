@@ -1,0 +1,172 @@
+---
+title: "Data 606 Final Project"
+author: "Claire Meyer"
+date: "5/17/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Abstract
+
+New York City high schools see a wide range of outcomes on AP exams. There are likely many factors influencing the overall AP exam pass rate of each school. This study explores two factors: the Boro (Bronx, Manhattan, Queens, Brooklyn, Staten Island), and the percent of the student population taking the exam, and how they influence the AP exam pass rate for a given high school.
+
+This is an observational study, taking data from 2012 AP Exams across all 247 NYC high schools. Outcomes were analyzed using a linear regression model. 
+
+Results from this analysis showed some relationship between the independent and response variable, but suggested there are likely many other key or more influential factors. There were also limitations to this analysis approach, due to the nature of this dataset.
+
+## Data Collection
+
+This data was retrieved from [NYC Open data](https://opendata.cityofnewyork.us/), which in turn sourced this data from the NYC Department of Education. 
+
+The AP results data is available for download [here](https://data.cityofnewyork.us/Education/2012-AP-Results/9ct9-prf9), while high school descriptors are available for download [here](https://data.cityofnewyork.us/Education/2018-DOE-High-School-Directory/vw9i-7mzq).
+
+This is an observational study. There are 247 cases in this dataset after cleanup, and each case is a high school in New York City.
+
+## Variables
+
+The response variable in this analysis is the `pass_rate`: the percentage of test takers that passed their AP exam. It is quantitative and numeric.
+
+The independent variables in this analysis are `Boro` and `pct_takers`: the percentage of students who take an AP exam. The former is qualitative and categorical, and the latter is quantitative and numeric.
+
+## Research Question
+
+This research looks at the proportion of AP exams passed from high schools in different New York City Boros, with varying numbers of test takers. 
+
+The research question this project will tackle is: *are a) Boro or b) proportion of the students taking tests predictive of AP exams pass rate?*
+
+## Data Preparation
+
+```{r data-prep, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(tidyverse)
+library(psych)
+
+# Load downloaded CSVs from Github repo
+hs_data <- read.csv("https://raw.githubusercontent.com/cmm6/data606-finalproject/main/2018_DOE_High_School_Directory.csv", header=TRUE)
+ap_data <- read.csv("https://raw.githubusercontent.com/cmm6/data606-finalproject/main/2012__AP_Results.csv", header=TRUE)
+
+# Clean up AP column names into easier to read form
+colnames(ap_data) <- c('dbn','school_name','num_test_takers','num_total_exams','num_passed_exams')
+
+# Join the two datasets with the required fields
+final_data <- inner_join(hs_data,ap_data,by='dbn') %>%
+  select(dbn,boro,total_students,num_test_takers,num_total_exams,num_passed_exams,attendance_rate) 
+
+# Turn numeric fields numeric
+final_data$total_students <- as.numeric(final_data$total_students)
+final_data$num_test_takers <- as.numeric(final_data$num_test_takers)
+final_data$num_total_exams <- as.numeric(final_data$num_total_exams)
+final_data$num_passed_exams <- as.numeric(final_data$num_passed_exams)
+
+# Drop schools with no test takers, replace NA to 0 for schools with no passed exams
+final_data <- final_data %>% 
+  drop_na(num_test_takers)
+
+final_data <- final_data %>% 
+  mutate_at(vars(num_passed_exams), ~replace_na(., 0))
+
+# Add mutated fields for percent of student body taking AP tests and percent passing
+final_data <- final_data %>%
+  mutate(pct_takers = num_test_takers/total_students) %>%
+  mutate(pass_rate = num_passed_exams/num_total_exams)
+```
+
+## Summary Statistics
+
+First, we'll use the summary() function to get summary statistics on each of our columns.  
+
+Looking at summary statistics on pass rate, we see the mean and median are fairly close together around 25-28%. Other columns see a lot more skew, with school size ranging from 128 to ~5600, and the percent of students who take a test ranging from 1 to 68%, with a mean of 9.5% and a median of around 12%.
+
+We can compare by Boro and see that 'M' has the highest mean and median rate, closely followed by 'R' and 'Q'. 'M' also has the highest standard deviation.
+
+```{r summary}
+summary(final_data)
+
+describeBy(final_data$pass_rate, 
+		   group = final_data$boro, mat=TRUE)
+```
+
+## Data Visualizations
+
+We can also leverage data visualization to understand our data better. To start, we can create a scatterplot between `pct_takers` and `pass_rate` to begin to understand if there is a linear relationship: 
+
+```{r scatter}
+ggplot(final_data,aes(pct_takers,pass_rate,color=boro))+geom_point()
+```
+
+We can also create box plots of `Boro` and `pass_rate` to understand how it differs by Boro: 
+
+```{r boxplot}
+ggplot(final_data,aes(boro,pass_rate)) + geom_boxplot()
+```
+
+We can also look at the distribution of schools across Boros in this dataset, and find that the 'R' Boro has much smaller representation than the other four.
+
+```{r boro}
+ggplot(final_data, aes(x=boro)) + 
+  geom_bar()
+```
+
+## Statistical Output
+
+Configuring a multiple linear regression using our independent variables: `boro` and `pct_takers`, we find that about 24% of variance in Pass Rate is explained by the high school's Boro and the percentage of students who take a test. 
+
+We can interpret the model equation as: 
+
+y = 0.09642 + (0.11635 * boroM) + (0.09578 * boroQ) + (0.09366 * boroR) + (0.03243 * boroX) + (1.11383 * pct_takers)
+
+```{r linear-reg}
+m_final <- lm(pass_rate ~ boro + pct_takers, data = final_data)
+summary(m_final)
+```
+
+## Conclusion
+
+The relationship between the independent and response variables, while not extremely strong, does have elements that are statistically significant. If a high school is in the 'M' Boro (presumably Manhattan) they are more likely to have higher rates of success on the AP Exam. Similarly if a higher proportion of the student population is taking the exam, the pass rate is likely to be higher. 
+
+This analysis also explored other available characteristics of high schools and found adding them generally did not impact the R-squared value positively, with the exception of attendance rate, whose addition increases the R-squared value to 27.5%. 
+
+```{r other-vars}
+m_other <- lm(pass_rate ~ boro + attendance_rate, data = final_data)
+summary(m_other)
+```
+
+## Why is this analysis important?
+
+This analysis is important because it begins to pull apart influences of high school success. There are likely many other factors (funding, socioeconomic factors, student-teacher ratio, etc.) that influence AP exam results, but this analysis suggests Boro and proportion of test takers could be part of that equation. 
+
+## Limitations of the analysis?
+
+This analysis is limited by the fact that the conditions for linear regression are not necessarily well met by this data. The conditions for linear regression are: (1) linearity, (2) nearly normal residuals, and (3) constant variability and all 3 do not seem to be well-met: 
+
+1. Linearity: 
+
+```{r q-res}
+ggplot(data = m_final, aes(sample = .resid)) +
+  stat_qq()
+```
+
+2. Nearly Normal Residuals: 
+
+```{r hist-res}
+ggplot(data = m_final, aes(x = .resid)) +
+  geom_histogram(binwidth = 0.1) +
+  xlab("Residuals")
+```
+
+3. Constant Variability: 
+
+There's a sharp line, I believe due to the high schools with a 0% pass rate, and variability is not constant.
+
+```{r residuals}
+ggplot(data = m_final, aes(x = .fitted, y = .resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  xlab("Fitted values") +
+  ylab("Residuals")
+```
+
