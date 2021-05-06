@@ -1,0 +1,303 @@
+---
+title: "607 Final Project"
+author: "Claire Meyer"
+date: "5/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Final Project {.tabset}
+
+This project looks at the New York Times' COVID coverage throughout the year 2020. The driving goal is to understand how coverage changed over time, how that related to case growth in its home city, and how sentiments may have shifted as understanding of the epidemic evolved.
+
+This project pulls data from two sources: 
+1. [New York Times Article Archive API](https://developer.nytimes.com/docs/archive-product/1/overview): an API endpoint from New York Times that returns metadata on articles from a specified month.
+2. Daily COVID case count data, made available by [NYC Open Data](https://data.cityofnewyork.us/Health/COVID-19-Daily-Counts-of-Cases-Hospitalizations-an/rc75-m7u3). 
+
+This project tidies and transforms the data into two usable pieces: the first an aggregated daily view into article and case counts for easy comparison, and the second a tidied dataframe that can be leveraged for sentiment analysis. 
+
+
+### Libraries
+
+```{r libraries, include=FALSE}
+library(tidyverse)
+library(jsonlite)
+library(RCurl)
+library(lubridate)
+library(anytime)
+library(ggwordcloud)
+library(tidytext)
+library(gganimate)
+```
+
+### Loading data from the NYT API
+
+First, data is loaded from the New York Times Article Archive API. The API endpoint returns data one month at a time, so we construct a list of URLs and iterate through, appending results. The API has a strict rate limit, so we add a sleep function to avoid the limit. Note that this does slow down the iterations slightly.
+
+```{r api-call}
+#https://nicercode.github.io/guides/repeating-things/ 
+months <- c('1','2','3','4','5','6','7','8','9','10','11','12')
+urls <- sprintf('https://api.nytimes.com/svc/archive/v1/2020/%s.json?api-key=XxcKN3J85PUc5ZLfZDuglOuRDvmcP182',months)
+
+for (url in urls) {
+    raw_results <- fromJSON(txt = url)
+    headlines_temp <- raw_results$response$docs$headline
+    headlines_temp$pub_date <- raw_results$response$docs$pub_date
+    headlines_temp$url <- url
+    headlines_temp$abstract <- raw_results$response$docs$abstract
+    # For the first month of the year, instantiate the main dataframe, otherwise add to it.
+    if(url=='https://api.nytimes.com/svc/archive/v1/2020/1.json?api-key=XxcKN3J85PUc5ZLfZDuglOuRDvmcP182'){
+      headlines_df <- headlines_temp
+    }
+    else{
+      headlines_df <- rbind(headlines_df, headlines_temp)
+    }
+# NYT has a rate limit, so we space out requests by 6 seconds
+# https://stackoverflow.com/questions/47780628/using-sys-sleep-to-delay-api-call
+    Sys.sleep(6)
+}
+```
+
+### Loading data from NYC Open Data
+
+The CSV from NYC Open Data is saved in Github. We can read it into a CSV.
+
+```{r import-csv}
+x <- getURL("http://raw.githubusercontent.com/cmm6/data607-finalproject/main/COVID-19_Daily_Counts_of_Cases__Hospitalizations__and_Deaths%20(1).csv",.opts=curlOptions(followlocation = TRUE)) 
+covid_cases <- read.csv(text = x, header=TRUE)
+```
+
+### Tidying for Daily Comparison
+
+First, we tidy and transform the New York Times API results for daily aggregation. This involves grabbing article dates and the main headline, filtering for COVID-19 related headlines, and transforming `pub_date` to a Date format. Then we group by date and count the number of relevant headlines per day.
+
+```{r tidying-nyt}
+# First trim down the Dataframe and filter for relevant headlines
+nyt_headlines <- headlines_df %>%
+  select(main,pub_date,url,abstract) %>%
+  filter(str_detect(main,"COVID|Coronavirus|covid"))
+
+# Convert pub_date to the Date format, so we can transform and aggregate as needed
+# https://cran.r-project.org/web/packages/anytime/vignettes/anytime-introduction.pdf
+nyt_headlines$pub_date <- anydate(nyt_headlines$pub_date)
+
+# Count up by day
+nyt_daily_agg <- nyt_headlines %>%
+  group_by(pub_date) %>%
+  summarise(n_articles = n())
+
+colnames(nyt_daily_agg) <- c('DATE_OF_INTEREST','article_count')
+```
+
+The case data is fairly tidy for this use case, already at a daily grain. We transform the `date_of_interest` to a Date format, and case_count to a numeric format. 
+
+```{r tidying-case}
+# Convert the dates to the Date format, so we can transform and aggregate as needed
+# https://cran.r-project.org/web/packages/anytime/vignettes/anytime-introduction.pdf
+covid_cases$DATE_OF_INTEREST = anydate(covid_cases$DATE_OF_INTEREST)
+# Make case count numeric so we can summary
+covid_cases$CASE_COUNT = as.numeric(covid_cases$CASE_COUNT)
+```
+
+Then we combine the two dataframes into a larger table with daily counts of articles and cases. Because articles pre-dated cases, we use a left join to merge.
+
+```{r tidy-together}
+# Combine df, fix
+final_df <- left_join(nyt_daily_agg,covid_cases,by='DATE_OF_INTEREST')
+final_df
+```
+
+### Daily Count Analysis
+
+First, we want to understand what relationship case counts and article counts share.
+
+Plotting the growth on top of each other, we see articles spiked shortly before case volume in NYC did in the first March - April spike, however the same did not occur for the secondary wave in November/December.
+
+```{r viz}
+# https://www.r-graph-gallery.com/line-chart-dual-Y-axis-ggplot2.html
+coeff <- 0.01
+
+ggplot(final_df, aes(x=DATE_OF_INTEREST)) +
+  geom_line( aes(y=CASE_COUNT), color = "lightblue") + 
+  geom_line( aes(y=article_count / coeff), color = "darkgreen") 
+  scale_y_continuous(
+    # Define first axis
+    name = "Case Count",
+    # Add the second axis and specify its name and definition
+    sec.axis = sec_axis(~.*coeff, name="Article Count")
+  )
+```
+A scatterplot of the two counts shows there could be some linear relationship
+
+```{r stats}
+final_df %>%
+  ggplot(aes(article_count,CASE_COUNT))+geom_point()
+```
+
+Creating a simple linear regression, we find the R-squared value is 0.3391, meaning 33.9% of the variance in case count can be explained by article count.
+
+```{r linear-reg}
+lm_article <- lm(article_count ~ CASE_COUNT, data = final_df)
+summary(lm_article)
+```
+
+```{r fit-model-scatter}
+# Fit model to scatter plot
+ggplot(data = final_df, aes(x = CASE_COUNT, y = article_count)) +
+  geom_point() +
+  stat_smooth(method = "lm", se = FALSE)
+```
+
+Reviewing the requirements for a linear regression model, it's not clear that all are met by this full dataset, however. While there is some linear relationship and the residuals seem nearly normal, the variance in residuals is not constant as evidenced by the following plots: 
+
+```{r eval-cond}
+# Evaluate the conditions of linear model
+ggplot(data = lm_article, aes(x = .resid)) +
+  geom_histogram(binwidth = 2) +
+  xlab("Residuals")
+
+ggplot(data = lm_article, aes(x = .fitted, y = .resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  xlab("Fitted values") +
+  ylab("Residuals")
+```
+
+But what if we just look at the first surge, and remove the later data where the trends don't seem to align as well?
+
+The R-squared value increases, but still not by much - excluding the last 2 months of data, 40% of variance in case count can be explained by article count. 
+
+```{r linear-reg-apr}
+first_wave <- final_df %>%
+  filter(DATE_OF_INTEREST < '2020-11-01')
+
+lm_firstwave <- lm(article_count ~ CASE_COUNT, data = first_wave)
+summary(lm_firstwave)
+
+ggplot(data = first_wave, aes(x = CASE_COUNT, y = article_count)) +
+  geom_point() +
+  stat_smooth(method = "lm", se = FALSE)
+```
+While there is some relationship between these two values, article count does not seem to be as responsive to case count as I might have expected, particularly as the pandemic went on.
+
+### Tidying for Sentiment Analysis
+
+In addition to the relationship to case data, we can also dig into the articles themselves a bit, and see what they can tell us about changing sentiments around COVID, if any. Did, for example, sentiment improve as vaccines were approved and released?
+
+We pulled both the main headlines and the abstracts of all articles from the archive. We'll compare both, to see if trends diverge due to headline 'clickbait'. First, we tidy the data appropriately, segmenting by each article and creating daily and monthly sentiment dataframes. We also index every 50 articles, to make eventual charts more readable.
+
+```{r sentiment}
+tidy_headlines <- nyt_headlines %>%
+  mutate(month=floor_date(pub_date, "month")) %>%
+  mutate(
+    headlinenumber = row_number(),
+    month = floor_date(pub_date, "month")) %>%
+  ungroup() %>%
+  unnest_tokens(word, main)
+
+tidy_abstracts <- nyt_headlines %>%
+  mutate(month=floor_date(pub_date, "month")) %>%
+  mutate(
+    headlinenumber = row_number(),
+    month = floor_date(pub_date, "month")) %>%
+  ungroup() %>%
+  unnest_tokens(word, abstract)
+
+headline_sentiment_monthly <- tidy_headlines %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(month, index = headlinenumber %/% 50, sentiment) %>% 
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+headline_sentiment_daily <- tidy_headlines %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(pub_date, index = headlinenumber %/% 50, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+abstract_sentiment_monthly <- tidy_abstracts %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(month, index = headlinenumber %/% 50, sentiment) %>% 
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+
+abstract_sentiment_daily <- tidy_abstracts %>%
+  inner_join(get_sentiments("bing")) %>%
+  count(pub_date, index = headlinenumber %/% 50, sentiment) %>%
+  pivot_wider(names_from = sentiment, values_from = n, values_fill = 0) %>% 
+  mutate(sentiment = positive - negative)
+```
+
+
+### Sentiment Analysis
+
+Then we can plot headline sentiment over time, both monthly and daily. We see that sentiment definitely improved over time, and the monthly grain shows that change began in September and October.
+
+```{r plotting-headlines}
+ggplot(headline_sentiment_monthly, aes(index, sentiment, fill = month)) +
+  geom_col(show.legend = FALSE) + facet_wrap(~month, ncol= 2, scales="free_x")
+
+ggplot(headline_sentiment_daily, aes(index, sentiment, fill = pub_date)) +
+  geom_col(show.legend = FALSE)
+```
+Then we can compare headline sentiment to sentiments in article abstracts. We see the trends do seem to follow each other, but headlines seem overall more positive.
+
+```{r plotting-abstracts}
+ggplot(abstract_sentiment_monthly, aes(index, sentiment, fill = month)) +
+  geom_col(show.legend = FALSE) + facet_wrap(~month, ncol= 2, scales="free_x")
+
+ggplot(abstract_sentiment_daily, aes(index, sentiment, fill = pub_date)) +
+  geom_col(show.legend = FALSE)
+```
+ 
+### Headline Word Clouds
+
+ Finally, we can look at most common words in COVID headlines, and how it changes over time. 
+ 
+ To look over time, we can use ggwordcloud, which allows you to facet_wrap similar to other ggplot2 plot types. We'll filter out words with less than 10 occurrences, and the word 'Coronavirus', or else it will dominate all the clouds. We see 'vaccine' make its first appearance in July, and then consistently in September - December. 'Briefing' is consistently the most common word. 
+ 
+```{r word cloud}
+wordcloud_counts <- tidy_headlines %>%
+  group_by(month) %>%
+  anti_join(stop_words) %>%
+  count(word) %>%
+  filter(n >= 10) %>%
+# Filter out Coronavirus or it will be huge
+  filter(word != 'coronavirus')
+
+ggplot(
+  wordcloud_counts,
+  aes(label = word, size = n)
+) +
+  geom_text_wordcloud_area() +
+  scale_size_area(max_size = 7) +
+  theme_light() +
+  facet_wrap(~month) 
+```
+We can also use `gganimate` to animate the word cloud changes over time and make it easier to see.
+
+```{r animate-wordcloud}
+# https://stackoverflow.com/questions/61132650/is-there-a-way-to-animate-a-word-cloud-in-r
+cloud <- ggplot(
+  wordcloud_counts,
+  aes(label = word, size = n)
+) +
+  geom_text_wordcloud_area() +
+  scale_size_area(max_size = 20) +
+  theme_light()
+
+gg2 <- cloud + transition_time(month) +
+  labs(title = 'Date: {frame_time}')
+
+# https://stackoverflow.com/questions/59592030/error-the-animation-object-does-not-specify-a-save-animation-method
+animate(gg2, fps = 4, end_pause = 15,renderer=gifski_renderer("wordclouds.gif"))
+
+```
+
+## Conclusions
+
+This project surfaced a few key findings. First, that the relationship between New York Times article counts and New York City case counts is not very strong. This makes sense, given the global nature of the paper, but is true even when we focus on the early stages of the pandemic, when it was largely concentrated in the Times' home city. We also discovered that headline and abstract sentiment of COVID-19 articles has improved over 2020, likely tied to the advent of vaccines. Abstract sentiment seemed on the whole more negative, suggesting headlines were in a sense 'sugar-coating' the content of the actual article. This was counter-intuitive for me - I suspected 'clickbait' would drive especially dire headlines. 
